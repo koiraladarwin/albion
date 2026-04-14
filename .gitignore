@@ -1,4 +1,6 @@
-items.db
-items.db-shm
-items.db-wal
+*.exe
+*.db
+*.db-shm
+*.db-wal
 arbitrage.xlsx
+arbitrage_results.txt
