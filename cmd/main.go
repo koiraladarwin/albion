@@ -526,6 +526,7 @@ func exportArbitrageExcel(results []ArbitrageResult) error {
 }
 
 type Result struct {
+	ItemName string
 	ItemID    string
 	BuyCities string
 	BuyPrice  int
@@ -550,9 +551,6 @@ func toInterface(arr []string) []interface{} {
 	return out
 }
 
-// -------------------------
-// main feature function
-// -------------------------
 func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error) {
 
 	// ----------------------------
@@ -636,24 +634,29 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 
 	for _, item := range items {
 
-		// BUY (min sell_price_min ignoring 0)
+		// ---------------- BUY + ITEM NAME ----------------
 		var buy sql.NullInt64
+		var itemName string
 
 		buyQuery := `
-			SELECT MIN(NULLIF(sell_price_min, 0))
-			FROM prices
-			WHERE item_id = ?
-			AND city IN (` + placeholders(len(buyCities)) + `)
+			SELECT 
+				MIN(NULLIF(p.sell_price_min, 0)),
+				i.name
+			FROM prices p
+			LEFT JOIN items i ON i.id = p.item_id
+			WHERE p.item_id = ?
+			AND p.city IN (` + placeholders(len(buyCities)) + `)
+			GROUP BY i.name
 		`
 
 		args := append([]interface{}{item}, toInterface(buyCities)...)
 
-		err := db.QueryRow(buyQuery, args...).Scan(&buy)
+		err := db.QueryRow(buyQuery, args...).Scan(&buy, &itemName)
 		if err != nil || !buy.Valid {
 			continue
 		}
 
-		// SELL (max buy_price_max)
+		// ---------------- SELL ----------------
 		var sell sql.NullInt64
 
 		err = db.QueryRow(`
@@ -667,10 +670,12 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 			continue
 		}
 
+		// ---------------- CALC ----------------
 		profit := int(sell.Int64 - buy.Int64)
 		profitPct := (float64(profit) * 100.0) / float64(buy.Int64)
 
 		results = append(results, Result{
+			ItemName:  itemName,
 			ItemID:    item,
 			BuyCities: strings.Join(buyCities, ","),
 			BuyPrice:  int(buy.Int64),
@@ -683,14 +688,16 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 
 	return results, nil
 }
+
 func printResults(results []Result) {
 	fmt.Println("\n🔥 ARBITRAGE RESULTS")
 	fmt.Println("================================")
 
 	for _, r := range results {
 		fmt.Printf(
-			"%s\nBuy: %s (%d)\nSell: %s (%d)\nProfit: %d (%.2f%%)\n\n",
+			"%s(%s)\nBuy: %s (%d)\nSell: %s (%d)\nProfit: %d (%.2f%%)\n\n",
 			r.ItemID,
+			r.ItemName,
 			r.BuyCities,
 			r.BuyPrice,
 			r.SellCity,
