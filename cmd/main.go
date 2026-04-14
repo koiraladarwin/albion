@@ -95,7 +95,6 @@ func findBestArbitrage(db *sql.DB, minProfitPct float64) ([]ArbitrageResult, err
 			a.ItemName = r.ItemName
 		}
 
-		// BUY = lowest sell price
 		if r.SellMin > 0 {
 			if a.BuyPrice == 0 || r.SellMin < a.BuyPrice {
 				a.BuyPrice = r.SellMin
@@ -103,7 +102,6 @@ func findBestArbitrage(db *sql.DB, minProfitPct float64) ([]ArbitrageResult, err
 			}
 		}
 
-		// SELL = highest buy price
 		if r.BuyMax > 0 {
 			if r.BuyMax > a.SellPrice {
 				a.SellPrice = r.BuyMax
@@ -176,9 +174,6 @@ func scrapeAndStorePrices(db *sql.DB) error {
 	}
 	defer stmt.Close()
 
-	// ----------------------------
-	// STEP 1: load all item IDs
-	// ----------------------------
 	var items []string
 
 	for rows.Next() {
@@ -189,9 +184,6 @@ func scrapeAndStorePrices(db *sql.DB) error {
 		items = append(items, id)
 	}
 
-	// ----------------------------
-	// STEP 2: batch size = 500
-	// ----------------------------
 	batchSize := 150
 	count := 0
 
@@ -211,7 +203,6 @@ func scrapeAndStorePrices(db *sql.DB) error {
 		fmt.Println(url)
 		var resp *http.Response
 
-		// retry loop
 		for {
 			resp, err = client.Get(url)
 			if err != nil {
@@ -237,7 +228,6 @@ func scrapeAndStorePrices(db *sql.DB) error {
 		}
 		resp.Body.Close()
 
-		// insert into DB
 		for _, p := range data {
 			_, err := stmt.Exec(
 				p.ItemID,
@@ -256,7 +246,6 @@ func scrapeAndStorePrices(db *sql.DB) error {
 
 		fmt.Println("  ✅ batch done")
 
-		// ⚠️ important: avoid throttling
 		time.Sleep(1200 * time.Millisecond)
 	}
 
@@ -487,7 +476,6 @@ func exportArbitrageExcel(results []ArbitrageResult) error {
 	sheet := "Arbitrage"
 	f.SetSheetName("Sheet1", sheet)
 
-	// headers
 	headers := []string{
 		"Item ID", "Item Name",
 		"Buy City", "Buy Price",
@@ -501,7 +489,6 @@ func exportArbitrageExcel(results []ArbitrageResult) error {
 		f.SetCellValue(sheet, cell, h)
 	}
 
-	// data
 	for i, r := range results {
 		row := i + 2
 
@@ -536,9 +523,6 @@ type Result struct {
 	ProfitPct float64
 }
 
-// -------------------------
-// helpers
-// -------------------------
 func placeholders(n int) string {
 	return strings.TrimRight(strings.Repeat("?,", n), ",")
 }
@@ -553,9 +537,6 @@ func toInterface(arr []string) []interface{} {
 
 func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error) {
 
-	// ----------------------------
-	// Load favorites
-	// ----------------------------
 	rows, err := db.Query(`SELECT item_id FROM favorites`)
 	if err != nil {
 		return nil, err
@@ -575,9 +556,6 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 		return nil, nil
 	}
 
-	// ----------------------------
-	// Cities list
-	// ----------------------------
 	cities := []string{
 		"Lymhurst",
 		"Bridgewatch",
@@ -588,9 +566,6 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 		"Black Market",
 	}
 
-	// ----------------------------
-	// BUY input
-	// ----------------------------
 	fmt.Println("\n=== CITIES ===")
 	for i, c := range cities {
 		fmt.Printf("%d) %s\n", i+1, c)
@@ -614,9 +589,6 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 		return nil, fmt.Errorf("no valid BUY cities selected")
 	}
 
-	// ----------------------------
-	// SELL input
-	// ----------------------------
 	fmt.Print("Enter SELL city index: ")
 	sellInput, _ := reader.ReadString('\n')
 	sellInput = strings.TrimSpace(sellInput)
@@ -627,14 +599,10 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 	}
 	sellCity := cities[sellIdx-1]
 
-	// ----------------------------
-	// Compute results
-	// ----------------------------
 	var results []Result
 
 	for _, item := range items {
 
-		// ---------------- BUY + ITEM NAME ----------------
 		var buy sql.NullInt64
 		var itemName string
 
@@ -656,7 +624,6 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 			continue
 		}
 
-		// ---------------- SELL ----------------
 		var sell sql.NullInt64
 
 		err = db.QueryRow(`
@@ -670,7 +637,6 @@ func handleFavoritesArbitrage(db *sql.DB, reader *bufio.Reader) ([]Result, error
 			continue
 		}
 
-		// ---------------- CALC ----------------
 		profit := int(sell.Int64 - buy.Int64)
 		profitPct := (float64(profit) * 100.0) / float64(buy.Int64)
 
@@ -707,10 +673,35 @@ func printResults(results []Result) {
 		)
 	}
 }
+func exportResultsTxt(results []Result, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
-// -------------------------
-// CLI entry
-// -------------------------
+	w := bufio.NewWriter(file)
+
+	w.WriteString("🔥 ARBITRAGE RESULTS\n")
+	w.WriteString("================================\n\n")
+
+	for _, r := range results {
+		fmt.Fprintf(w,
+			"%s (%s)\nBuy: %s (%d)\nSell: %s (%d)\nProfit: %d (%.2f%%)\n\n",
+			r.ItemID,
+			r.ItemName,
+			r.BuyCities,
+			r.BuyPrice,
+			r.SellCity,
+			r.SellPrice,
+			r.Profit,
+			r.ProfitPct,
+		)
+	}
+
+	return w.Flush()
+}
+
 func handleFavoritesAribitageCLI(db *sql.DB, reader *bufio.Reader) error {
 
 	results, err := handleFavoritesArbitrage(db, reader)
@@ -720,15 +711,28 @@ func handleFavoritesAribitageCLI(db *sql.DB, reader *bufio.Reader) error {
 
 	fmt.Println("\nChoose output:")
 	fmt.Println("1) Print")
-	fmt.Println("2) Exit")
+	fmt.Println("2) Export to text file")
+	fmt.Println("3) Exit")
 	fmt.Print("Choice: ")
 
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(choice)
 
 	switch choice {
+
 	case "1":
 		printResults(results)
+
+	case "2":
+		filename := "arbitrage_results.txt"
+		err := exportResultsTxt(results, filename)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Saved to", filename)
+
+	default:
+		fmt.Println("Exit")
 	}
 
 	return nil
