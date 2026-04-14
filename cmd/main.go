@@ -289,16 +289,63 @@ func addToFavorites(db *sql.DB, itemId string) error {
 	return err
 }
 
-func removeFromFavorites(db *sql.DB, itemId string) error {
-	_, err := db.Exec(
-		"DELETE FROM favorites WHERE item_id = ?",
-		itemId,
-	)
+func removeFromFavorites(db *sql.DB, reader *bufio.Reader) error {
 
-	if err == nil {
-		fmt.Println("Removed from favorites:", itemId)
+	// 1. Load favorites
+	rows, err := db.Query(`
+		SELECT item_id
+		FROM favorites
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return err
 	}
-	return err
+	defer rows.Close()
+
+	var items []string
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		items = append(items, id)
+	}
+
+	if len(items) == 0 {
+		fmt.Println("No favorites found")
+		return nil
+	}
+
+	// 2. Print list
+	fmt.Println("\n=== FAVORITES ===")
+	for i, id := range items {
+		fmt.Printf("%d) %s\n", i+1, id)
+	}
+
+	// 3. Ask user input
+	fmt.Print("\nEnter index to remove: ")
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+
+	idx, err := strconv.Atoi(input)
+	if err != nil || idx < 1 || idx > len(items) {
+		return fmt.Errorf("invalid index")
+	}
+
+	itemID := items[idx-1]
+
+	// 4. Delete
+	_, err = db.Exec(
+		"DELETE FROM favorites WHERE item_id = ?",
+		itemID,
+	)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Removed from favorites:", itemID)
+	return nil
 }
 
 func seeFavorites(db *sql.DB) error {
@@ -416,13 +463,7 @@ func editFavorites(reader *bufio.Reader, db *sql.DB) error {
 		}
 
 	case "2":
-		itemId, err := selectItems(reader, db)
-		if err != nil {
-			return err
-		}
-		if itemId != "" {
-			return removeFromFavorites(db, itemId)
-		}
+			return removeFromFavorites(db, reader)
 	case "3":
 		return nil
 	}
