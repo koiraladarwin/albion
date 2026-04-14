@@ -10,8 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -739,7 +738,7 @@ func handleFavoritesAribitageCLI(db *sql.DB, reader *bufio.Reader) error {
 }
 
 func main() {
-	db, err := sql.Open("sqlite3", "items.db")
+	db, err := sql.Open("sqlite", "items.db")
 	if err != nil {
 		panic(err)
 	}
