@@ -5,13 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	_ "modernc.org/sqlite"
+
 	"github.com/xuri/excelize/v2"
+	_ "modernc.org/sqlite"
 )
 
 type Price struct {
@@ -149,9 +151,28 @@ func findBestArbitrage(db *sql.DB, minProfitPct float64) ([]ArbitrageResult, err
 
 	return results, nil
 }
+
 func scrapeAndStorePrices(db *sql.DB) error {
+
 	db.Exec("PRAGMA journal_mode=WAL;")
 	db.Exec("PRAGMA busy_timeout=5000;")
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec("DELETE FROM prices")
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	_, _ = tx.Exec("DELETE FROM sqlite_sequence WHERE name='prices'")
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 
 	rows, err := db.Query("SELECT id FROM items")
 	if err != nil {
@@ -199,19 +220,19 @@ func scrapeAndStorePrices(db *sql.DB) error {
 
 		url := "https://europe.albion-online-data.com/api/v2/stats/prices/" +
 			strings.Join(batch, ",")
-		fmt.Println(url)
+
 		var resp *http.Response
 
 		for {
 			resp, err = client.Get(url)
 			if err != nil {
-				fmt.Println("  ❌ request error, retrying...")
+				fmt.Println("❌ request error, retrying...")
 				time.Sleep(2 * time.Second)
 				continue
 			}
 
 			if resp.StatusCode != 200 {
-				fmt.Println("  ❌ bad status:", resp.StatusCode, "retrying...")
+				fmt.Println("❌ bad status:", resp.StatusCode, "retrying...")
 				resp.Body.Close()
 				time.Sleep(2 * time.Second)
 				continue
@@ -243,8 +264,7 @@ func scrapeAndStorePrices(db *sql.DB) error {
 			}
 		}
 
-		fmt.Println("  ✅ batch done")
-
+		fmt.Println("✅ batch done")
 		time.Sleep(1200 * time.Millisecond)
 	}
 
@@ -512,7 +532,7 @@ func exportArbitrageExcel(results []ArbitrageResult) error {
 }
 
 type Result struct {
-	ItemName string
+	ItemName  string
 	ItemID    string
 	BuyCities string
 	BuyPrice  int
@@ -737,6 +757,95 @@ func handleFavoritesAribitageCLI(db *sql.DB, reader *bufio.Reader) error {
 	return nil
 }
 
+func importItemsFromAlbion(db *sql.DB) error {
+
+	url := "https://cdn.albionfreemarket.com/AlbionFormattedItemsParser/us_name_mappings.json"
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("failed request: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	items := make(map[string]string)
+	if err := json.Unmarshal(body, &items); err != nil {
+		return err
+	}
+
+	stmt, err := db.Prepare(`
+		INSERT OR REPLACE INTO items (id, name)
+		VALUES (?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	count := 0
+
+	for id, name := range items {
+		if id == "" || name == "" {
+			continue
+		}
+
+		_, err := stmt.Exec(id, name)
+		if err != nil {
+			return err
+		}
+
+		count++
+	}
+
+	fmt.Printf("✅ Imported %d items\n", count)
+	return nil
+}
+
+func initDB(db *sql.DB) error {
+
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS items (
+			id TEXT PRIMARY KEY,
+			name TEXT
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS favorites (
+			item_id TEXT PRIMARY KEY,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (item_id) REFERENCES items(id)
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS prices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			item_id TEXT NOT NULL,
+			city TEXT NOT NULL,
+			quality INTEGER NOT NULL,
+			sell_price_min INTEGER,
+			sell_price_max INTEGER,
+			buy_price_min INTEGER,
+			buy_price_max INTEGER,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (item_id) REFERENCES items(id)
+		);`,
+	}
+
+	for _, q := range queries {
+		if _, err := db.Exec(q); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	db, err := sql.Open("sqlite", "items.db")
 	if err != nil {
@@ -744,17 +853,22 @@ func main() {
 	}
 	defer db.Close()
 
+	if err := initDB(db); err != nil {
+		panic(err)
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Println("\n==== MENU ====")
-		fmt.Println("1) See Items")
-		fmt.Println("2) Edit Favorites")
-		fmt.Println("3) See Favourites")
-		fmt.Println("4) Scrape All Items")
-		fmt.Println("5) Find Best Guaranteed")
-		fmt.Println("6) Favourite Arbitage")
-		fmt.Println("7) Exit")
+		fmt.Println("1) Scrape All Items")
+		fmt.Println("2) Search Items")
+		fmt.Println("3) Edit Favorites")
+		fmt.Println("4) See Favourites")
+		fmt.Println("5) Scrape All Items Prices")
+		fmt.Println("6) Find Best Guaranteed")
+		fmt.Println("7) Favourite Arbitage")
+		fmt.Println("8) Exit")
 		fmt.Print("Choice: ")
 
 		input, _ := reader.ReadString('\n')
@@ -762,35 +876,40 @@ func main() {
 
 		switch choice {
 		case "1":
-			seeItems(reader, db)
+			if err := importItemsFromAlbion(db); err != nil {
+				panic(err)
+			}
 
 		case "2":
+			seeItems(reader, db)
+
+		case "3":
 			err := editFavorites(reader, db)
 			if err != nil {
 				fmt.Println("Error:", err)
 			}
-		case "3":
+		case "4":
 			err := seeFavorites(db)
 			if err != nil {
 				fmt.Println("Error:", err)
 			}
-		case "4":
+		case "5":
 			err := scrapeAndStorePrices(db)
 			if err != nil {
 				fmt.Println("Error:", err)
 			}
 
-		case "5":
+		case "6":
 			err := handleArbitrageCLI(db, reader)
 			if err != nil {
 				fmt.Println("Error:", err)
 			}
-		case "6":
+		case "7":
 			err := handleFavoritesAribitageCLI(db, reader)
 			if err != nil {
 				fmt.Println("Error:", err)
 			}
-		case "7":
+		case "8":
 			fmt.Println("Bye!")
 			return
 
